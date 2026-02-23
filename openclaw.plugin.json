@@ -1,0 +1,10 @@
+{
+  "id": "thought-filter",
+  "name": "Thought Filter",
+  "description": "Filters out inner thoughts/reasoning from outgoing WhatsApp messages",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

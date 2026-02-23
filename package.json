@@ -1,0 +1,33 @@
+{
+  "name": "openclaw-thought-filter",
+  "version": "1.0.0",
+  "description": "OpenClaw plugin that filters out AI inner thoughts/reasoning before sending messages to clients via WhatsApp",
+  "type": "module",
+  "main": "index.ts",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "whatsapp",
+    "thought-filter",
+    "ai-safety",
+    "thinking-leak",
+    "message-filter",
+    "agent"
+  ],
+  "author": "Valiña Informática <valinainformatica@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Valinainformatica/openclaw-thought-filter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Valinainformatica/openclaw-thought-filter/issues"
+  },
+  "homepage": "https://github.com/Valinainformatica/openclaw-thought-filter#readme",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
