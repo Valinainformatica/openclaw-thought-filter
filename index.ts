@@ -41,6 +41,7 @@ const SIGNALS: Signal[] = [
   { pattern: /(?:aviso|pregunto|consulto|digo|paso|notifico|informo) a (?:Efren|Jose|Efrén|José)/i, score: 40, label: "mentions-boss" },
   { pattern: /(?:Efren|Jose|Efrén|José) (?:está|estará|no está|anda|dice|dijo|me dijo|pregunta|pide|quiere)/i, score: 30, label: "references-boss" },
   { pattern: /(?:le (?:paso|pregunto|digo|comento) a (?:Efren|Jose))/i, score: 40, label: "action-toward-boss" },
+  { pattern: /(?:–\s*Efren|–\s*José|–\s*Jose|Efren\)|José\)|Jose\))/i, score: 20, label: "boss-name-in-context" },
 
   // ── References parts/orders by ID ──
   { pattern: /parte #?\d{3,}/i, score: 30, label: "part-id" },
@@ -55,6 +56,9 @@ const SIGNALS: Signal[] = [
   // ── "Es [Name]," client identification (with optional phone/ID in parentheses) ──
   { pattern: /^Es [A-ZÁÉÍÓÚÑa-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s()\d]{1,50},/i, score: 35, label: "client-identification" },
 
+  // ── Self-identification as phone number / internal note ──
+  { pattern: /^Es mi (?:número|teléfono|línea|contacto)/i, score: 35, label: "self-number-identification" },
+
   // ── Internal vocabulary ──
   { pattern: /(?:comercial\/contable|tema (?:comercial|contable|administrativo|interno))/i, score: 25, label: "internal-vocab" },
   { pattern: /(?:fuera de (?:mi|su|nuestro) (?:competencia|alcance|ámbito))/i, score: 25, label: "scope-assessment" },
@@ -64,7 +68,10 @@ const SIGNALS: Signal[] = [
 
   // ── Narrating what the client did/sent ──
   { pattern: /(?:me (?:manda|envía|pasa|escribe|reenvía) (?:foto|imagen|pdf|documento|audio|video|captura|mensaje))/i, score: 20, label: "narrating-receipt" },
+  { pattern: /mandando (?:un |una |el |la )?(?:foto|imagen|pdf|documento|audio|video|captura|mensaje|archivo)/i, score: 20, label: "narrating-sending" },
   { pattern: /(?:[Vv]eo (?:el |la |un |una |que |los |las ))/i, score: 15, label: "narrating-observation" },
+  { pattern: /(?:(?:el )?archivo (?:parece|es|contiene|tiene)|parece (?:ser|que es) (?:un |una |el ))/i, score: 20, label: "analyzing-content" },
+  { pattern: /(?:no sé (?:qué|si|cómo|por qué|para qué) (?:quieres|quiere|hacer|hago))/i, score: 25, label: "unsure-intent" },
 
   // ── Describing schedule/context internally ──
   { pattern: /(?:como|ya que|porque) es horario (?:laboral|de cierre)/i, score: 25, label: "schedule-context" },
