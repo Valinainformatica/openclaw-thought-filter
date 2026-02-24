@@ -2,149 +2,146 @@
  * Thought Filter Plugin for OpenClaw
  *
  * Intercepts outgoing WhatsApp messages via the `message_sending` plugin hook
- * and strips "thinking out loud" lines that the agent writes as plain text.
+ * and uses a scoring heuristic to detect "thinking out loud" — internal
+ * reasoning that the agent accidentally writes as plain text.
  *
- * These are NOT <thinking> blocks (those are already stripped by core).
- * These are lines like:
- *   "Es Adrian, el del USB para musica/DJ. Pero no tengo contexto de que es 'padre'."
- *   "Ahora lo pillo - quiere saber si su padre pasa por la tienda hoy."
- *   "Sigue sin tener sentido. Le pregunto directamente:"
- *   "Voy a buscar en la BD..."
+ * Instead of a blacklist of exact patterns (which the model easily evades),
+ * this plugin accumulates weighted signals. If the total score exceeds a
+ * threshold, the message is blocked or stripped.
+ *
+ * v2.0 — Scoring heuristic replaces regex blacklist approach
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
-// ── Thought-detection patterns ──────────────────────────────────────────
+// ── Scoring threshold ───────────────────────────────────────────────────
 
-const THOUGHT_PATTERNS: RegExp[] = [
-  // ── Inner monologue starters ──
-  /^(?:Voy a |Estoy |Necesito |Tengo que |Debo |Ahora (?:voy|tengo|necesito|busco|lo pillo|entiendo))/i,
-  /^(?:No tengo contexto|Sin contexto|No reconozco|No s[eé] qui[eé]n|Me falta)/i,
-  /^(?:Sigue sin (?:tener )?sentido|No (?:me )?queda claro|No entiendo)/i,
-  /^(?:Le pregunto |Le voy a preguntar|Pregunto |Consulto )/i,
-  /^(?:Buscando |Mirando |Comprobando |Verificando |Revisando )/i,
-  /^(?:L[ií]nea a[ñn]adida|Relleno |Rellenando )/i,
-  /^(?:Bloqueado|Eso no es correcto|Me llev[oó] a otro)/i,
+const BLOCK_THRESHOLD = 50;
 
-  // ── "Es [Name]..." client identification (multi-word names, Unicode) ──
-  // With comma: "Es Adrián, el del USB..." / "Es María Jesús, la del Medion..."
-  /^Es [A-ZÁÉÍÓÚÑa-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s]{1,40},\s*(?:el |la |del |de la |quien |que |tiene |con )/i,
-  // Without comma but name must be 3+ chars: "Es Conchita la del portátil"
-  /^Es [A-ZÁÉÍÓÚÑa-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s]{3,40}\s+(?:el |la |del |de la |quien |tiene |con )/i,
+// ── Signal definitions ──────────────────────────────────────────────────
+
+type Signal = {
+  pattern: RegExp;
+  score: number;
+  label: string;
+};
+
+const SIGNALS: Signal[] = [
+  // ═══════════════════════════════════════════════════════════════════════
+  // POSITIVE signals (indicators of internal thought)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ── Direct thought starters (very strong) ──
+  { pattern: /^(?:Voy a |Necesito |Tengo que |Debo )/i, score: 40, label: "monologue-start" },
+  { pattern: /(?:No tengo contexto|Sin contexto|No reconozco|Me falta)/i, score: 45, label: "no-context" },
+  { pattern: /(?:Sigue sin (?:tener )?sentido|No (?:me )?queda claro)/i, score: 40, label: "confusion" },
+  { pattern: /^(?:Ahora (?:lo pillo|entiendo|veo|comprendo))/i, score: 40, label: "realization" },
+
+  // ── Mentions boss/colleague by name (strong) ──
+  { pattern: /(?:aviso|pregunto|consulto|digo|paso|notifico|informo) a (?:Efren|Jose|Efrén|José)/i, score: 40, label: "mentions-boss" },
+  { pattern: /(?:Efren|Jose|Efrén|José) (?:está|estará|no está|anda|dice|dijo|me dijo|pregunta|pide|quiere)/i, score: 30, label: "references-boss" },
+  { pattern: /(?:le (?:paso|pregunto|digo|comento) a (?:Efren|Jose))/i, score: 40, label: "action-toward-boss" },
+
+  // ── References parts/orders by ID ──
+  { pattern: /parte #?\d{3,}/i, score: 30, label: "part-id" },
+  { pattern: /pedido #?\d{3,}/i, score: 30, label: "order-id" },
+
+  // ── Third-person description of client (they're not talking TO the client) ──
+  { pattern: /(?:no es cliente|es (?:un )?(?:tema|asunto) )/i, score: 30, label: "internal-classification" },
+  { pattern: /(?:preguntando por|pregunta por|pide que le|solicita que)/i, score: 20, label: "third-person-narration" },
+
+  // ── "Es [Name]," client identification ──
+  { pattern: /^Es [A-ZÁÉÍÓÚÑa-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s]{1,40},/i, score: 35, label: "client-identification" },
+
+  // ── Internal vocabulary ──
+  { pattern: /(?:comercial\/contable|tema (?:comercial|contable|administrativo|interno))/i, score: 25, label: "internal-vocab" },
+  { pattern: /(?:fuera de (?:mi|su|nuestro) (?:competencia|alcance|ámbito))/i, score: 25, label: "scope-assessment" },
+  { pattern: /(?:no (?:tengo|tiene) ficha|sin ficha|sin historial)/i, score: 35, label: "no-file" },
+  { pattern: /(?:en (?:la|el) (?:BD|base de datos|sistema|CRM|ERP)|algún parte (?:abierto|pendiente|activo))/i, score: 20, label: "internal-system" },
+
+  // ── Narrating what the client did/sent ──
+  { pattern: /(?:me (?:manda|envía|pasa|escribe|reenvía) (?:foto|imagen|pdf|documento|audio|video|captura|mensaje))/i, score: 20, label: "narrating-receipt" },
+  { pattern: /(?:[Vv]eo (?:el |la |un |una |que |los |las ))/i, score: 15, label: "narrating-observation" },
+
+  // ── Describing schedule/context internally ──
+  { pattern: /(?:como|ya que|porque) es horario (?:laboral|de cierre)/i, score: 25, label: "schedule-context" },
+  { pattern: /estamos a las \d/i, score: 20, label: "time-reference" },
+  { pattern: /(?:antes de (?:contestar|responder|decirle|hacer nada))/i, score: 25, label: "before-acting" },
+  { pattern: /(?:fuera de horario|en horario laboral|en mi turno)/i, score: 20, label: "shift-reference" },
+
+  // ── "Pero no me dice" / reasoning about ambiguity ──
+  { pattern: /[Pp]ero no me dice/i, score: 30, label: "but-doesnt-say" },
+  { pattern: /no me (?:queda claro|especifica|indica|dice) (?:qu[eé]|por|para|c[oó]mo|si)/i, score: 30, label: "unclear-intent" },
 
   // ── Narrating own actions ──
-  /(?:^|\. )(?:Voy a buscar|Ahora busco|Primero (?:busco|miro|compruebo|verifico))/i,
-  /(?:^|\. )(?:Ejecuto|Ejecutando|Lanzo|Lanzando) /i,
+  { pattern: /(?:^|\. )(?:Busco|Miro|Compruebo|Verifico|Reviso|Ejecuto) /i, score: 20, label: "narrating-action" },
+  { pattern: /(?:^|\. )(?:Buscando|Mirando|Comprobando|Verificando|Revisando|Ejecutando) /i, score: 20, label: "narrating-gerund" },
 
-  // ── Planning/reasoning connectors ──
-  /^(?:Para (?:esto|ello|eso)|En (?:este caso|principio)|Seg[uú]n )/i,
+  // ── Planning connectors ──
+  { pattern: /^(?:Le pregunto |Le voy a preguntar|Pregunto |Consulto )/i, score: 30, label: "planning-ask" },
+  { pattern: /(?:Le pregunto (?:para|a ver|si|directamente)|Le confirmo|Le digo).*:$/i, score: 35, label: "trailing-thought" },
 
-  // ── English equivalents (fallback) ──
-  /^(?:Let me |I'm going to |I need to |Looking for |Searching |I don't have context)/i,
+  // ── "Voy a [verb]" mid-sentence (planning action) ──
+  { pattern: /(?:\.\s*|;\s*|–\s*|-\s*)Voy a (?:buscar|mirar|comprobar|verificar|revisar|preguntar|consultar)/i, score: 30, label: "mid-sentence-plan" },
 
-  // ── Meta-commentary about the conversation ──
-  /(?:quiere saber|est[aá] preguntando|me est[aá] pidiendo|lo que pide es)/i,
-  /(?:no me dice|no me queda claro|no especifica|no indica)/i,
+  // ── Self-identification as AI/bot ──
+  { pattern: /(?:soy (?:una? )?(?:IA|inteligencia artificial|bot|asistente virtual|chatbot))/i, score: 50, label: "reveals-ai" },
+  { pattern: /(?:soy Claudia,? (?:la|el|del|una))/i, score: 15, label: "claudia-identity" },
 
-  // ── Trailing thought markers ending with ":" ──
-  /(?:Le pregunto (?:para|a ver|si)|Le confirmo|Le digo|Le respondo).*:$/i,
+  // ── English equivalents ──
+  { pattern: /^(?:Let me |I'm going to |I need to |I don't have context)/i, score: 40, label: "english-monologue" },
+  { pattern: /^(?:Looking for |Searching |Checking )/i, score: 30, label: "english-narration" },
 
-  // ── Self-narrated corrections ──
-  /^(?:Perdona|Corrijo|Me equivoqu[eé]|Error m[ií]o).*(?:en realidad|quer[ií]a decir|lo correcto es)/i,
+  // ── Meta-commentary about what the client wants ──
+  { pattern: /(?:quiere saber|está preguntando|me está pidiendo|lo que pide es)/i, score: 25, label: "meta-commentary" },
 
-  // ── Reasoning about what to do ──
-  /(?:pregunto a (?:Efren|Jose|efren|jose)|aviso a (?:Efren|Jose)|antes de (?:contestar|responder))/i,
-  /(?:como es horario|fuera de horario|estamos a las)/i,
+  // ═══════════════════════════════════════════════════════════════════════
+  // NEGATIVE signals (indicators this IS a client-facing message)
+  // ═══════════════════════════════════════════════════════════════════════
 
-  // ── Describing what the client sent (narrating receipt) ──
-  /(?:me (?:manda|env[ií]a|pasa) (?:foto|imagen|pdf|documento|audio|video|captura))/i,
-  /(?:Veo (?:el |la |un |una |que ))/i,
+  // ── Greetings ──
+  { pattern: /^(?:Buenas|Buenos? (?:d[ií]as|tardes|noches)|Hola|Muy buenas)/i, score: -50, label: "greeting" },
+
+  // ── Direct address to the client ──
+  { pattern: /\?/i, score: -15, label: "question-mark" },
+  { pattern: /(?:^|\s)(?:te |tu |tú |ti )/i, score: -15, label: "direct-address-te" },
+  { pattern: /(?:dime|cuéntame|necesitas|pásate|cuando quieras)/i, score: -20, label: "invitation" },
+
+  // ── Short message (likely a quick reply) ──
+  { pattern: /^.{1,25}$/i, score: -15, label: "short-message" },
+
+  // ── Acknowledgements ──
+  { pattern: /^(?:Ok|Vale|Dale|Sip|Perfecto|Pefecto|Genial|Entendido)/i, score: -40, label: "acknowledgement" },
+
+  // ── Patience / hold messages ──
+  { pattern: /^(?:Un momento|Dame un segundo|Ahora te |Espera un)/i, score: -40, label: "hold-message" },
+
+  // ── Common client speech starters ──
+  { pattern: /^Es que /i, score: -40, label: "es-que" },
+  { pattern: /^Es verdad/i, score: -30, label: "es-verdad" },
+
+  // ── Apologies to client ──
+  { pattern: /^(?:Perdona que |Disculpa |Lo siento)/i, score: -30, label: "apology" },
+
+  // ── Helpful content (prices, links, instructions) ──
+  { pattern: /(?:https?:\/\/|www\.)/i, score: -20, label: "contains-url" },
+  { pattern: /(?:\d+[.,]\d{2}\s*€|\d+\s*euros?)/i, score: -15, label: "contains-price" },
 ];
 
-// Lines that should NEVER be filtered (legitimate client replies)
-const SAFE_PATTERNS: RegExp[] = [
-  /^(?:Buenas|Buenos? (?:d[ií]as|tardes|noches)|Hola|Ok|Vale|Dale|Sip|Perfecto|Pefecto)/i,
-  /^(?:Dime|Cu[eé]ntame|Qu[eé] (?:tal|necesitas|pasa)|C[oó]mo (?:puedo|te))/i,
-  /^(?:Perdona que (?:estaba|no te|tard[eé])|Disculpa)/i,
-  /^(?:Un momento|Dame un segundo|Ahora te (?:miro|digo|confirmo|aviso))/i,
-  // Common client speech that could match thought patterns
-  /^Es que /i,
-  /^Es verdad/i,
-];
+// ── Scoring engine ──────────────────────────────────────────────────────
 
-function isThoughtLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) return false;
+function scoreMessage(content: string): { score: number; matched: string[] } {
+  let score = 0;
+  const matched: string[] = [];
 
-  for (const safe of SAFE_PATTERNS) {
-    if (safe.test(trimmed)) return false;
-  }
-
-  for (const pattern of THOUGHT_PATTERNS) {
-    if (pattern.test(trimmed)) return true;
-  }
-
-  return false;
-}
-
-// ── Whole-message thought indicators ────────────────────────────────────
-// If ANY of these appear anywhere in the message, the ENTIRE message is
-// likely internal reasoning (not a client reply).
-
-const WHOLE_MESSAGE_THOUGHT_SIGNALS: RegExp[] = [
-  // Referencing internal systems / asking boss
-  /pregunto a (?:Efren|Jose|efren|jose) (?:antes|primero|por)/i,
-  /aviso a (?:Efren|Jose) /i,
-  /antes de (?:contestar|responder|decirle)/i,
-
-  // Describing time/schedule context internally
-  /(?:como|ya que|porque) es horario (?:laboral|de cierre)/i,
-  /estamos a las \d/i,
-
-  // Referencing parts/orders by ID as internal note
-  /tiene (?:el )?parte #?\d+/i,
-
-  // Narrating what you see in media
-  /[Mm]e manda (?:foto|imagen|pdf|documento).+[Vv]eo /i,
-
-  // "Pero no me dice" / "No me especifica" reasoning
-  /[Pp]ero no me dice/i,
-  /no me (?:queda claro|especifica|indica|dice) (?:qu[eé]|por|para|c[oó]mo|si)/i,
-];
-
-function isWholeMessageThought(content: string): boolean {
-  for (const signal of WHOLE_MESSAGE_THOUGHT_SIGNALS) {
-    if (signal.test(content)) return true;
-  }
-  return false;
-}
-
-function filterThoughts(content: string): { filtered: string; removed: string[] } {
-  // First: check if the entire message is a thought
-  if (isWholeMessageThought(content)) {
-    return {
-      filtered: "",
-      removed: [content],
-    };
-  }
-
-  // Then: line-by-line filtering
-  const lines = content.split("\n");
-  const kept: string[] = [];
-  const removed: string[] = [];
-
-  for (const line of lines) {
-    if (isThoughtLine(line)) {
-      removed.push(line);
-    } else {
-      kept.push(line);
+  for (const signal of SIGNALS) {
+    if (signal.pattern.test(content)) {
+      score += signal.score;
+      matched.push(`${signal.label}(${signal.score > 0 ? "+" : ""}${signal.score})`);
     }
   }
 
-  return {
-    filtered: kept.join("\n").trim(),
-    removed,
-  };
+  return { score, matched };
 }
 
 // ── Plugin definition ───────────────────────────────────────────────────
@@ -152,43 +149,37 @@ function filterThoughts(content: string): { filtered: string; removed: string[] 
 const plugin = {
   id: "thought-filter",
   name: "Thought Filter",
-  description: "Filters out inner thoughts/reasoning from outgoing WhatsApp messages",
+  description: "Filters out inner thoughts/reasoning from outgoing WhatsApp messages using scoring heuristic",
 
   register(api: OpenClawPluginApi) {
     api.on("message_sending", (event, ctx) => {
-      // Only filter on WhatsApp (Telegram is Efren - he sees everything)
+      // Only filter on client-facing channels (not admin/Telegram)
       if (ctx.channelId !== "whatsapp") return;
 
-      const original = event.content;
-      if (!original) return;
+      const content = event.content;
+      if (!content) return;
 
-      const { filtered, removed } = filterThoughts(original);
+      const { score, matched } = scoreMessage(content);
 
-      if (removed.length > 0) {
-        api.logger.warn(
-          `[thought-filter] Stripped ${removed.length} thought line(s) from message to ${event.to}:\n` +
-            removed.map((l) => `  - "${l}"`).join("\n")
+      // Log scoring for debugging (always, even if not blocked)
+      if (matched.length > 0) {
+        api.logger.info(
+          `[thought-filter] Score ${score}/${BLOCK_THRESHOLD} for message to ${event.to}: [${matched.join(", ")}]`
         );
       }
 
-      // If everything was filtered out, cancel the message entirely
-      if (!filtered) {
+      // Block if score meets threshold
+      if (score >= BLOCK_THRESHOLD) {
         api.logger.warn(
-          `[thought-filter] Entire message to ${event.to} was thoughts only. Cancelling send.`
+          `[thought-filter] BLOCKED message to ${event.to} (score ${score}): "${content.substring(0, 120)}..."`
         );
         return { cancel: true };
       }
 
-      // If we removed something, return the cleaned content
-      if (filtered !== original) {
-        return { content: filtered };
-      }
-
-      // No changes
       return;
     });
 
-    api.logger.info("[thought-filter] Loaded - monitoring outbound WhatsApp messages");
+    api.logger.info(`[thought-filter] v2.0 loaded — scoring heuristic, threshold=${BLOCK_THRESHOLD}`);
   },
 };
 
