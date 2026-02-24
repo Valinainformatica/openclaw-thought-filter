@@ -49,15 +49,18 @@ const SIGNALS: Signal[] = [
   // ── Third-person description of client (they're not talking TO the client) ──
   { pattern: /(?:no es cliente|es (?:un )?(?:tema|asunto) )/i, score: 30, label: "internal-classification" },
   { pattern: /(?:preguntando por|pregunta por|pide que le|solicita que)/i, score: 20, label: "third-person-narration" },
+  { pattern: /(?:Dice que |dice que (?:viene|va|quiere|necesita|pasa|llama|trae))/i, score: 25, label: "relays-client-speech" },
+  { pattern: /(?:que (?:estamos|estoy) (?:montando|reparando|arreglando|esperando|tramitando|gestionando|preparando))/i, score: 20, label: "work-in-progress" },
 
-  // ── "Es [Name]," client identification ──
-  { pattern: /^Es [A-ZÁÉÍÓÚÑa-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s]{1,40},/i, score: 35, label: "client-identification" },
+  // ── "Es [Name]," client identification (with optional phone/ID in parentheses) ──
+  { pattern: /^Es [A-ZÁÉÍÓÚÑa-záéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s()\d]{1,50},/i, score: 35, label: "client-identification" },
 
   // ── Internal vocabulary ──
   { pattern: /(?:comercial\/contable|tema (?:comercial|contable|administrativo|interno))/i, score: 25, label: "internal-vocab" },
   { pattern: /(?:fuera de (?:mi|su|nuestro) (?:competencia|alcance|ámbito))/i, score: 25, label: "scope-assessment" },
   { pattern: /(?:no (?:tengo|tiene) ficha|sin ficha|sin historial)/i, score: 35, label: "no-file" },
   { pattern: /(?:en (?:la|el) (?:BD|base de datos|sistema|CRM|ERP)|algún parte (?:abierto|pendiente|activo))/i, score: 20, label: "internal-system" },
+  { pattern: /\(\d{6,}\)/i, score: 20, label: "phone-in-parens" },
 
   // ── Narrating what the client did/sent ──
   { pattern: /(?:me (?:manda|envía|pasa|escribe|reenvía) (?:foto|imagen|pdf|documento|audio|video|captura|mensaje))/i, score: 20, label: "narrating-receipt" },
